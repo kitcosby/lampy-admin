@@ -3,6 +3,8 @@ Living document — update these diagrams when adding features.
 
 Lampy administration console. A Flask web app (`console.py`, ~53K) plus an embedded asyncssh admin server that runs inside the `lampy` WSL distro as a supervisord program named `console` (root, `/opt/lampy-console`), bound to distro-localhost `127.0.0.1:8090` for the web UI (configurable via `CONSOLE_BIND`/`CONSOLE_PORT`) and `127.0.0.1:8022` for SSH admin. It gives Kit browser and terminal control of the whole Lampy forum stack — service health and restarts, forum browsing and posting, a generic PostgreSQL database browser, mail via Apache James (IMAP/SMTP plus the WebAdmin API), Ollama model management and Gwen chat, httpd admin, R Theory site deployment plus parse/vectorize/search, and console self-updates — with no Docker and no WSL terminal needed.
 
+**2026-10-24 revision:** the repo gained a second, Windows-side administration tool — `lampy-admin-win.ps1` (commit 7a3ccf02, 2026-10-13), a single-file dashboard that runs on the Windows host, serves `http://127.0.0.1:8899/` via `HttpListener`, and administers the same distro by running commands as root through `wsl.exe`. It is drawn below as process 11.0; it owns no database and does not replace the console.
+
 Console authentication **shares** the forum database: accounts are created by the forum app's `/register` and live in the forum `users` table with werkzeug password hashes; the console only verifies credentials against that table and keeps `{id, username, is_admin}` in the signed Flask session. Admin-gated areas require the forum `is_admin` flag. There is no separate account store.
 
 ## 1. Context diagram (level 0)
@@ -18,6 +20,7 @@ flowchart
     E7["Apache httpd"]
     E8["GitHub"]
     E9["Windows host"]
+    E10["Lampy WSL distro (via wsl.exe)"]
     S("0 Lampy admin console")
     E1 -->|"logon credentials and admin commands"| S
     S -->|"admin pages, JSON APIs, and chat replies"| E1
@@ -37,6 +40,10 @@ flowchart
     E8 -->|"release tarballs and site-dist files"| S
     S -->|"portproxy configuration changes over SSH"| E9
     E9 -->|"port forward state"| S
+    E1 -->|"dashboard requests (Windows browser)"| S
+    S -->|"dashboard pages and psql results"| E1
+    S -->|"wsl.exe service and psql commands (Windows dashboard)"| E10
+    E10 -->|"service state and psql output"| S
 ```
 
 ## 2. Level-1 data flow diagram
@@ -62,6 +69,7 @@ flowchart
     P8("8.0 Administer Apache httpd")
     P9("9.0 Manage Windows port forwards")
     P10("10.0 Parse and index R Theory site")
+    P11("11.0 Serve Windows admin dashboard")
     D1[("D1 Forum database")]
     D2[("D2 Settings and model-override files")]
     D3[("D3 Mail credential vault (in-memory)")]
@@ -139,11 +147,17 @@ flowchart
     P10 -->|"embedding requests"| E5
     E5 -->|"embedding vectors"| P10
     P10 -->|"search result pages"| E1
+    E1 -->|"dashboard service and psql requests"| P11
+    P11 -->|"wsl.exe commands as root in the distro"| E9
+    E9 -->|"command output and service state"| P11
+    P11 -->|"psql commands via wsl.exe"| E3
+    E3 -->|"psql output"| P11
+    P11 -->|"dashboard pages and psql results"| E1
 ```
 
 ## 3. Entity–relationship diagram
 
-The console owns no database of its own. It reads and writes the forum app's PostgreSQL schema and creates two tables in the forum database: `mail_user_roles` (W-4b) and `rtheory_chunks` (R Theory vectorization). `forum_daily` is a TimescaleDB continuous-aggregate materialized view over `forum_events`. `ai.vectorizer` is the pgAI catalog the worker tab reads.
+Neither tool owns a database of its own. The Windows dashboard (`lampy-admin-win.ps1`) likewise owns no database: it runs `psql` inside the distro via `wsl.exe` against whichever PostgreSQL database the operator selects. The console It reads and writes the forum app's PostgreSQL schema and creates two tables in the forum database: `mail_user_roles` (W-4b) and `rtheory_chunks` (R Theory vectorization). `forum_daily` is a TimescaleDB continuous-aggregate materialized view over `forum_events`. `ai.vectorizer` is the pgAI catalog the worker tab reads.
 
 ```mermaid
 erDiagram
@@ -255,6 +269,9 @@ erDiagram
 - INFERRED: the DFD groups the 60+ routes into 10 processes by feature area; the grouping is my synthesis, not a repo-declared architecture layer.
 - INFERRED: `ai.vectorizer` column types are not declared in the repo (only the SELECT list is observed); the ERD lists the observed columns without asserting SQL types.
 - OBSERVED (GitHub main, commits since 2026-09-28): self-updater module, settings module, R Theory website updater (ledger detection + deploy), theory updater routes, website update-checker UI, forum login toggle, W-4b mail roles (module + tests), W-8 signup (routes + 9 tests), W-9 HTTPD tab (routes + 8 tests), W-8/W-9 docs, this SAD architecture doc.
+- OBSERVED (`lampy-admin-win.ps1`, commit 7a3ccf02, 2026-10-13): single-file Windows dashboard — `System.Net.HttpListener` bound to `http://127.0.0.1:8899/` only (reachable from the Windows machine alone, opens automatically); requests are dispatched to a PowerShell runspace pool (`[runspacefactory]::CreateRunspacePool(1, $maxConcurrent)` with `$maxConcurrent = 12` — the "12-concurrent HTTP serving" of the commit message), replacing the earlier single-user-at-a-time handling.
+- OBSERVED (`lampy-admin-win.ps1`): service model differs from the console's — six services (`apache2`, `ollama`, `forum`, `bible`, `codeserver` via `supervisorctl -c /etc/supervisor/conf.d/lampy.conf`, and `postgres` via `pg_ctl` as the postgres user, explicitly "not under supervisord"); all commands run as root inside the distro via `wsl -d lampy -u root -- bash -c`; the script fails fast when the distro is not visible to the current Windows user (WSL distros are per-user, HKCU).
+- OBSERVED (`lampy-admin-win.ps1`): a PostgreSQL admin panel posts to `/api/pg/psql`; the command is base64-piped through `wsl.exe` to `/usr/local/pgsql/bin/psql` as the postgres user against the operator-selected database — no credentials or database of its own.
 
 ## Relationship to the other repo
 
